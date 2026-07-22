@@ -95,7 +95,9 @@ def relationship_data(record: dict[str, Any]) -> dict[str, Any]:
         "method": props.get("method"),
         "model": props.get("model"),
         "similarity_score": props.get("similarity_score"),
-        "evidence_source": props.get("evidence_source") or props.get("evidence_new") or props.get("evidence"),
+        "evidence_source": props.get("evidence_source")
+        or props.get("evidence_new")
+        or props.get("evidence"),
         "evidence_target": props.get("evidence_target") or props.get("evidence_old"),
         "reason": props.get("reason"),
     }
@@ -211,8 +213,7 @@ class Neo4jLegalGraphRepository:
 
     async def ensure_indexes(self) -> None:
         rows = await self._read(
-            "SHOW INDEXES YIELD name, type, options WHERE type = 'VECTOR' "
-            "RETURN name, options"
+            "SHOW INDEXES YIELD name, type, options WHERE type = 'VECTOR' RETURN name, options"
         )
         for row in rows:
             if row["name"] not in INDEX_SPECS:
@@ -232,9 +233,37 @@ class Neo4jLegalGraphRepository:
     async def schema(self, include_counts: bool = False) -> dict[str, Any]:
         labels = ["Document", "Chapter", "Section", "Article", "Clause", "Point", "HanhVi"]
         properties = {
-            "LegalNode": ["id", "document_id", "level", "number", "title", "content", "order", "parent_id"],
-            "Document": ["document_number", "document_type", "document_name", "issued_date", "effective_date", "expiration_date", "issuing_authority", "validity_status", "source_url"],
-            "HanhVi": ["id", "canonical_text", "actor", "action", "object", "condition", "status", "confidence"],
+            "LegalNode": [
+                "id",
+                "document_id",
+                "level",
+                "number",
+                "title",
+                "content",
+                "order",
+                "parent_id",
+            ],
+            "Document": [
+                "document_number",
+                "document_type",
+                "document_name",
+                "issued_date",
+                "effective_date",
+                "expiration_date",
+                "issuing_authority",
+                "validity_status",
+                "source_url",
+            ],
+            "HanhVi": [
+                "id",
+                "canonical_text",
+                "actor",
+                "action",
+                "object",
+                "condition",
+                "status",
+                "confidence",
+            ],
         }
         result: dict[str, Any] = {
             "labels": labels,
@@ -271,7 +300,9 @@ class Neo4jLegalGraphRepository:
             document_type=kwargs.get("document_type"),
             validity_status=kwargs.get("validity_status"),
             issuing_authority=kwargs.get("issuing_authority"),
-            issued_from=kwargs.get("issued_from").isoformat() if kwargs.get("issued_from") else None,
+            issued_from=kwargs.get("issued_from").isoformat()
+            if kwargs.get("issued_from")
+            else None,
             issued_to=kwargs.get("issued_to").isoformat() if kwargs.get("issued_to") else None,
             cursor_name=cursor_name,
             cursor_id=cursor_id,
@@ -283,7 +314,10 @@ class Neo4jLegalGraphRepository:
         next_cursor = None
         if has_more and items:
             next_cursor = _encode_cursor(items[-1].get("document_name") or "", items[-1]["id"])
-        return {"items": items, "page": {"limit": limit, "next_cursor": next_cursor, "has_more": has_more}}
+        return {
+            "items": items,
+            "page": {"limit": limit, "next_cursor": next_cursor, "has_more": has_more},
+        }
 
     async def get_document(self, document_id: str, **kwargs: Any) -> dict[str, Any] | None:
         rows = await self._read("MATCH (d:Document {document_id: $id}) RETURN d", id=document_id)
@@ -298,7 +332,9 @@ class Neo4jLegalGraphRepository:
             result["relations"] = (await self.relations(relation_request))["items"]
         return result
 
-    async def outline(self, document_id: str, depth: int, include_content: bool) -> dict[str, Any] | None:
+    async def outline(
+        self, document_id: str, depth: int, include_content: bool
+    ) -> dict[str, Any] | None:
         doc = await self.get_document(document_id)
         if not doc:
             return None
@@ -319,7 +355,9 @@ class Neo4jLegalGraphRepository:
             parent = by_id.get(item["node"].get("parent_id"))
             (parent["children"] if parent else roots).append(item)
         for item in by_id.values():
-            item["children"].sort(key=lambda child: (child["node"].get("order") or 0, child["node"]["id"]))
+            item["children"].sort(
+                key=lambda child: (child["node"].get("order") or 0, child["node"]["id"])
+            )
         return {"document": doc["document"], "outline": roots, "truncated": False}
 
     async def resolve(self, request: ResolveRequest) -> list[dict[str, Any]]:
@@ -329,7 +367,11 @@ class Neo4jLegalGraphRepository:
             "clause": re.search(r"(?:khoản|khoan)\s+([\w-]+)", lowered),
             "point": re.search(r"(?:điểm|diem)\s+([a-zđ])", lowered),
         }
-        if not any(patterns.values()) and not request.hints.document_id and not request.hints.document_number:
+        if (
+            not any(patterns.values())
+            and not request.hints.document_id
+            and not request.hints.document_number
+        ):
             return []
         rows = await self._read(
             """
@@ -358,7 +400,12 @@ class Neo4jLegalGraphRepository:
             [{"node_id": row["n"]["id"], "score": 1.0} for row in rows]
         )
         return [
-            {"node": hit["node"], "citation": hit["citation"], "confidence": 1.0, "match_type": "EXACT"}
+            {
+                "node": hit["node"],
+                "citation": hit["citation"],
+                "confidence": 1.0,
+                "match_type": "EXACT",
+            }
             for hit in hydrated
         ]
 
@@ -371,7 +418,8 @@ class Neo4jLegalGraphRepository:
             result["ancestors"] = hydrated[0].get("ancestors", [])
         if kwargs.get("include_children"):
             rows = await self._read(
-                "MATCH (:LegalNode {id: $id})-[:HAS_CHILD]->(n) RETURN n ORDER BY n.order", id=node_id
+                "MATCH (:LegalNode {id: $id})-[:HAS_CHILD]->(n) RETURN n ORDER BY n.order",
+                id=node_id,
             )
             result["children"] = [public_node(row["n"]) for row in rows]
         if kwargs.get("include_relations"):
@@ -389,16 +437,22 @@ class Neo4jLegalGraphRepository:
         max_nodes = kwargs.get("max_nodes", 50)
         rows = []
         if depth:
-            rows.extend(await self._read(
-                f"MATCH (:LegalNode {{id: $id}})-[:HAS_CHILD*1..{depth}]->(n) RETURN n ORDER BY n.id LIMIT $limit",
-                id=node_id, limit=max_nodes + 1,
-            ))
+            rows.extend(
+                await self._read(
+                    f"MATCH (:LegalNode {{id: $id}})-[:HAS_CHILD*1..{depth}]->(n) RETURN n ORDER BY n.id LIMIT $limit",
+                    id=node_id,
+                    limit=max_nodes + 1,
+                )
+            )
         if kwargs.get("siblings"):
-            rows.extend(await self._read(
-                "MATCH (p)-[:HAS_CHILD]->(:LegalNode {id: $id}) MATCH (p)-[:HAS_CHILD]->(n) "
-                "WHERE n.id <> $id RETURN n ORDER BY n.order LIMIT $limit",
-                id=node_id, limit=max_nodes + 1,
-            ))
+            rows.extend(
+                await self._read(
+                    "MATCH (p)-[:HAS_CHILD]->(:LegalNode {id: $id}) MATCH (p)-[:HAS_CHILD]->(n) "
+                    "WHERE n.id <> $id RETURN n ORDER BY n.order LIMIT $limit",
+                    id=node_id,
+                    limit=max_nodes + 1,
+                )
+            )
         unique = {row["n"]["id"]: public_node(row["n"]) for row in rows}
         values = list(unique.values())
         truncated = len(values) > max_nodes
@@ -407,7 +461,12 @@ class Neo4jLegalGraphRepository:
             base["node"].pop("content", None)
             for node in included:
                 node.pop("content", None)
-        return {**base, "related_nodes": included, "truncated": truncated, "omitted_count": max(0, len(values) - max_nodes)}
+        return {
+            **base,
+            "related_nodes": included,
+            "truncated": truncated,
+            "omitted_count": max(0, len(values) - max_nodes),
+        }
 
     @staticmethod
     def _filter_parameters(filters: SearchFilters) -> dict[str, Any]:
@@ -420,11 +479,22 @@ class Neo4jLegalGraphRepository:
             "issued_to": filters.issued_to.isoformat() if filters.issued_to else None,
         }
 
-    async def vector_search(self, embedding: list[float], index: str, filters: SearchFilters, candidate_k: int, min_score: float) -> list[dict[str, Any]]:
+    async def vector_search(
+        self,
+        embedding: list[float],
+        index: str,
+        filters: SearchFilters,
+        candidate_k: int,
+        min_score: float,
+    ) -> list[dict[str, Any]]:
         if index not in INDEX_SPECS:
             raise AppError("INVALID_FILTER", "Unsupported vector index")
         label, _ = INDEX_SPECS[index]
-        source_match = "OPTIONAL MATCH (node:HanhVi)-[:VI_PHAM]->(source:LegalNode)" if label == "HanhVi" else "WITH node, score, node AS source"
+        source_match = (
+            "OPTIONAL MATCH (node:HanhVi)-[:VI_PHAM]->(source:LegalNode)"
+            if label == "HanhVi"
+            else "WITH node, score, node AS source"
+        )
         rows = await self._read(
             f"""
             CALL db.index.vector.queryNodes('{index}', $candidate_k, $embedding)
@@ -448,7 +518,9 @@ class Neo4jLegalGraphRepository:
         )
         return rows
 
-    async def keyword_search(self, query: str, filters: SearchFilters, candidate_k: int) -> list[dict[str, Any]]:
+    async def keyword_search(
+        self, query: str, filters: SearchFilters, candidate_k: int
+    ) -> list[dict[str, Any]]:
         # Lucene-reserved punctuation is whitespace-normalized instead of passed as syntax.
         safe_query = re.sub(r"[+\-&|!(){}\[\]^\"~*?:\\/]", " ", query).strip()
         if not safe_query:
@@ -472,7 +544,9 @@ class Neo4jLegalGraphRepository:
         )
         return rows
 
-    async def hydrate_hits(self, hits: list[dict[str, Any]], include_ancestors: bool = True) -> list[dict[str, Any]]:
+    async def hydrate_hits(
+        self, hits: list[dict[str, Any]], include_ancestors: bool = True
+    ) -> list[dict[str, Any]]:
         if not hits:
             return []
         ids = [hit["node_id"] for hit in hits]
@@ -541,8 +615,9 @@ class Neo4jLegalGraphRepository:
         )
         # Query each seed independently so path semantics remain bounded and predictable.
         for seed_id in request.seed_ids[1:]:
-            rows.extend(await self._read(
-                f"""
+            rows.extend(
+                await self._read(
+                    f"""
                 MATCH (seed {{id: $seed_id}})
                 MATCH path=(seed){arrows[0]}[:{relation_fragment}*1..{request.depth}]{arrows[1]}(target)
                 WHERE all(r IN relationships(path) WHERE
@@ -550,11 +625,12 @@ class Neo4jLegalGraphRepository:
                     AND (r.confidence IS NULL OR r.confidence >= $min_confidence))
                 RETURN path LIMIT $path_limit
                 """,
-                seed_id=seed_id,
-                statuses=[status.value for status in request.relationship_statuses],
-                min_confidence=request.min_confidence,
-                path_limit=request.max_nodes * 3 + 1,
-            ))
+                    seed_id=seed_id,
+                    statuses=[status.value for status in request.relationship_statuses],
+                    min_confidence=request.min_confidence,
+                    path_limit=request.max_nodes * 3 + 1,
+                )
+            )
         nodes: dict[str, dict[str, Any]] = {}
         relations: dict[str, dict[str, Any]] = {}
         paths = []
@@ -569,15 +645,13 @@ class Neo4jLegalGraphRepository:
                     node_ids.append(item["id"])
             rel_types = []
             for rel in path.relationships:
-                source_id = path.nodes[rel.start_node.element_id == path.nodes[-1].element_id and -1 or 0]["id"] if False else None
-                # Neo4j relationship endpoint IDs are resolved from adjacent path nodes below.
                 rel_types.append(rel.type)
-            for index, rel in enumerate(path.relationships):
+            for rel in path.relationships:
                 data = relationship_data(
                     {
                         "type": rel.type,
-                        "source_id": path.nodes[index]["id"],
-                        "target_id": path.nodes[index + 1]["id"],
+                        "source_id": rel.start_node["id"],
+                        "target_id": rel.end_node["id"],
                         "properties": dict(rel),
                     }
                 )
@@ -586,9 +660,21 @@ class Neo4jLegalGraphRepository:
                 relations[key] = data
                 warnings.extend(w for w in data["warnings"] if w not in warnings)
             if request.include_paths and len(node_ids) == len(path.nodes):
-                paths.append({"node_ids": node_ids, "relationship_types": rel_types, "length": len(rel_types)})
+                paths.append(
+                    {
+                        "node_ids": node_ids,
+                        "relationship_types": rel_types,
+                        "length": len(rel_types),
+                    }
+                )
         truncated = len(rows) > request.max_nodes * 3 or len(nodes) >= request.max_nodes
-        return {"nodes": list(nodes.values()), "relationships": list(relations.values()), "paths": paths, "truncated": truncated, "warnings": warnings}
+        return {
+            "nodes": list(nodes.values()),
+            "relationships": list(relations.values()),
+            "paths": paths,
+            "truncated": truncated,
+            "warnings": warnings,
+        }
 
     async def relations(self, request: RelationsSearchRequest) -> dict[str, Any]:
         fragment = self._relationship_fragment(request.types)
@@ -620,8 +706,12 @@ class Neo4jLegalGraphRepository:
         )
         has_more = len(rows) > request.limit
         rows = rows[: request.limit]
-        source_hits = await self.hydrate_hits([{"node_id": row["source_id"], "score": 1.0} for row in rows])
-        target_hits = await self.hydrate_hits([{"node_id": row["target_id"], "score": 1.0} for row in rows])
+        source_hits = await self.hydrate_hits(
+            [{"node_id": row["source_id"], "score": 1.0} for row in rows]
+        )
+        target_hits = await self.hydrate_hits(
+            [{"node_id": row["target_id"], "score": 1.0} for row in rows]
+        )
         sources = {hit["node"]["id"]: hit for hit in source_hits}
         targets = {hit["node"]["id"]: hit for hit in target_hits}
         items = []
@@ -629,18 +719,29 @@ class Neo4jLegalGraphRepository:
             relation = relationship_data(row)
             source = sources.get(row["source_id"])
             target = targets.get(row["target_id"])
-            items.append({
-                "source": source["node"] if source else public_node(row["source"]),
-                "target": target["node"] if target else public_node(row["target"]),
-                "relationship": relation,
-                "source_citation": source.get("citation") if source else None,
-                "target_citation": target.get("citation") if target else None,
-                "warnings": relation["warnings"],
-            })
-        next_cursor = _encode_cursor(rows[-1]["source_id"], rows[-1]["target_id"]) if has_more and rows else None
-        return {"items": items, "page": {"limit": request.limit, "next_cursor": next_cursor, "has_more": has_more}}
+            items.append(
+                {
+                    "source": source["node"] if source else public_node(row["source"]),
+                    "target": target["node"] if target else public_node(row["target"]),
+                    "relationship": relation,
+                    "source_citation": source.get("citation") if source else None,
+                    "target_citation": target.get("citation") if target else None,
+                    "warnings": relation["warnings"],
+                }
+            )
+        next_cursor = (
+            _encode_cursor(rows[-1]["source_id"], rows[-1]["target_id"])
+            if has_more and rows
+            else None
+        )
+        return {
+            "items": items,
+            "page": {"limit": request.limit, "next_cursor": next_cursor, "has_more": has_more},
+        }
 
-    async def behaviors(self, request: BehaviorSearchRequest, embedding: list[float]) -> dict[str, Any]:
+    async def behaviors(
+        self, request: BehaviorSearchRequest, embedding: list[float]
+    ) -> dict[str, Any]:
         rows = await self._read(
             """
             CALL db.index.vector.queryNodes('behavior_embedding', $candidate_k, $embedding)
@@ -652,34 +753,60 @@ class Neo4jLegalGraphRepository:
             RETURN node, source.id AS source_id, score, properties(r) AS rel_properties
             ORDER BY score DESC LIMIT $top_k
             """,
-            candidate_k=max(request.top_k * 5, 50), embedding=embedding,
-            min_score=request.min_score, document_ids=request.document_ids or None,
-            statuses=[status.value for status in request.statuses], top_k=request.top_k,
+            candidate_k=max(request.top_k * 5, 50),
+            embedding=embedding,
+            min_score=request.min_score,
+            document_ids=request.document_ids or None,
+            statuses=[status.value for status in request.statuses],
+            top_k=request.top_k,
         )
-        sources = await self.hydrate_hits([{"node_id": row["source_id"], "score": row["score"]} for row in rows])
+        sources = await self.hydrate_hits(
+            [{"node_id": row["source_id"], "score": row["score"]} for row in rows]
+        )
         by_id = {item["node"]["id"]: item for item in sources}
         hits = []
         for row in rows:
             behavior = public_node(row["node"])
             source = by_id.get(row["source_id"])
             warnings = [PROPOSED_WARNING] if behavior.get("status") == "PROPOSED" else []
-            hits.append({"behavior": behavior, "score": row["score"],
-                         "source_node": source["node"] if request.include_source and source else None,
-                         "citation": source["citation"] if request.include_source and source else None,
-                         "warnings": warnings})
+            hits.append(
+                {
+                    "behavior": behavior,
+                    "score": row["score"],
+                    "source_node": source["node"] if request.include_source and source else None,
+                    "citation": source["citation"] if request.include_source and source else None,
+                    "warnings": warnings,
+                }
+            )
         return {"hits": hits}
 
-    async def comparisons(self, request: ComparisonSearchRequest, embedding: list[float] | None) -> dict[str, Any]:
+    async def comparisons(
+        self, request: ComparisonSearchRequest, embedding: list[float] | None
+    ) -> dict[str, Any]:
         relation_request = RelationsSearchRequest(
-            source={"document_ids": [request.source_document_id], "node_ids": request.source_node_ids},
+            source={
+                "document_ids": [request.source_document_id],
+                "node_ids": request.source_node_ids,
+            },
             target={"document_ids": [request.target_document_id]},
-            types=request.relationship_types, statuses=request.statuses, limit=request.top_k,
+            types=request.relationship_types,
+            statuses=request.statuses,
+            limit=request.top_k,
         )
         graph_items = (await self.relations(relation_request))["items"]
-        items = [{**item, "match_origin": "GRAPH_RELATION", "confidence": item["relationship"].get("confidence")} for item in graph_items]
+        items = [
+            {
+                **item,
+                "match_origin": "GRAPH_RELATION",
+                "confidence": item["relationship"].get("confidence"),
+            }
+            for item in graph_items
+        ]
         if embedding is not None and len(items) < request.top_k:
             filters = SearchFilters(document_ids=[request.target_document_id], levels=["article"])
-            candidates = await self.vector_search(embedding, "article_comparison_embedding", filters, request.top_k * 5, -1)
+            candidates = await self.vector_search(
+                embedding, "article_comparison_embedding", filters, request.top_k * 5, -1
+            )
             targets = await self.hydrate_hits(candidates)
             source_ids = request.source_node_ids
             if not source_ids:
@@ -688,16 +815,29 @@ class Neo4jLegalGraphRepository:
                     id=request.source_document_id,
                 )
                 source_ids = [row["id"] for row in source_rows]
-            source = (await self.hydrate_hits([{"node_id": source_ids[0], "score": 1.0}])) if source_ids else []
+            source = (
+                (await self.hydrate_hits([{"node_id": source_ids[0], "score": 1.0}]))
+                if source_ids
+                else []
+            )
             existing = {(item["source"]["id"], item["target"]["id"]) for item in items}
             for target in targets:
                 if not source or (source[0]["node"]["id"], target["node"]["id"]) in existing:
                     continue
-                items.append({"source": source[0]["node"], "target": target["node"],
-                              "relationship": None, "source_citation": source[0]["citation"],
-                              "target_citation": target["citation"], "match_origin": "VECTOR_CANDIDATE",
-                              "confidence": target["score"],
-                              "warnings": ["VECTOR_CANDIDATE chi la ung vien ngu nghia, khong phai quan he phap ly da xac nhan"]})
+                items.append(
+                    {
+                        "source": source[0]["node"],
+                        "target": target["node"],
+                        "relationship": None,
+                        "source_citation": source[0]["citation"],
+                        "target_citation": target["citation"],
+                        "match_origin": "VECTOR_CANDIDATE",
+                        "confidence": target["score"],
+                        "warnings": [
+                            "VECTOR_CANDIDATE chi la ung vien ngu nghia, khong phai quan he phap ly da xac nhan"
+                        ],
+                    }
+                )
                 if len(items) >= request.top_k:
                     break
         return {"items": items[: request.top_k]}

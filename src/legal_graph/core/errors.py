@@ -20,4 +20,6 @@ class AppError(Exception):
 
 
 def not_found(kind: str) -> AppError:
-    return AppError(f"{kind}_NOT_FOUND", kind.replace("_", " ").title() + " not found", status_code=404)
+    return AppError(
+        f"{kind}_NOT_FOUND", kind.replace("_", " ").title() + " not found", status_code=404
+    )

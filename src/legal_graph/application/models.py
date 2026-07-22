@@ -72,9 +72,9 @@ class BatchGetRequest(StrictModel):
 
 class SemanticSearchRequest(StrictModel):
     query: QueryText
-    index: Literal[
-        "legal_node_embedding", "article_comparison_embedding", "behavior_embedding"
-    ] = "legal_node_embedding"
+    index: Literal["legal_node_embedding", "article_comparison_embedding", "behavior_embedding"] = (
+        "legal_node_embedding"
+    )
     filters: SearchFilters = Field(default_factory=SearchFilters)
     top_k: int = Field(default=10, ge=1, le=50)
     min_score: float = Field(default=0.65, ge=-1, le=1)
@@ -178,9 +178,7 @@ class RetrievalOptions(StrictModel):
 
 class RetrievalGraphOptions(StrictModel):
     enabled: bool = True
-    relationships: list[RelationshipType] = Field(
-        default_factory=lambda: list(RelationshipType)
-    )
+    relationships: list[RelationshipType] = Field(default_factory=lambda: list(RelationshipType))
     depth: int = Field(default=1, ge=1, le=3)
     relationship_statuses: list[RelationStatus] = Field(
         default_factory=lambda: [RelationStatus.VERIFIED]

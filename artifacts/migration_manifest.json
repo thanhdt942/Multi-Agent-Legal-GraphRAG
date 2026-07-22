@@ -1,0 +1,38 @@
+{
+  "bundle_version": 1,
+  "data_directory": "artifacts",
+  "files": {
+    "flatten.jsonl": {
+      "size_bytes": 32296726,
+      "sha256": "16c303244c91118c6549707aa1dc1d8a17824689c7342a38f56c4f60e9dd7a9f"
+    },
+    "extracted_relations.jsonl": {
+      "size_bytes": 779625,
+      "sha256": "90d2b5626a36595d53abe94179571cee13c7e5b3b5274c6a71f439538f717a8d"
+    },
+    "extracted_behaviors.jsonl": {
+      "size_bytes": 20325,
+      "sha256": "8a094043de786e92eb187f17c33e51ccd6f5e9981781ff029f2f293e8e573ec4"
+    },
+    "legal_node_embeddings.parquet": {
+      "size_bytes": 37492094,
+      "sha256": "141105e5289f4c18e405c0f0da2f048081a6286d7e9412688f33b99e3e61dc1d"
+    },
+    "article_comparison_embeddings.parquet": {
+      "size_bytes": 3485786,
+      "sha256": "d68d1019de6061de32fc5c6ae6124f3abba4f89778aaee0680d17b5416264da3"
+    },
+    "behavior_embeddings.parquet": {
+      "size_bytes": 108671,
+      "sha256": "7ed9cbd196e5134818e21aa8f6102b8712819d7b47799845c111e1ea674f2db4"
+    },
+    "relationship.parquet": {
+      "size_bytes": 2374,
+      "sha256": "fb088f68c85e2e602f1d93d0f9e69264530f45cbda19d29366db3ec4d747179e"
+    },
+    "parsed.json": {
+      "size_bytes": 8965291,
+      "sha256": "0e6212068e8de8e4f13fa5bf6688222edc1d62e776983fef485922dcf48e1d04"
+    }
+  }
+}

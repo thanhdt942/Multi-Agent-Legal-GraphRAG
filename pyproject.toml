@@ -1,0 +1,44 @@
+[project]
+name = "vietnamese-legal-document"
+version = "0.1.0"
+description = "Retrieval API for the Vietnamese legal knowledge graph"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=5.0.0",
+    "huggingface-hub>=1.24.0",
+    "neo4j>=5.27.0",
+    "openai>=1.59.0",
+    "pandas>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "tiktoken>=0.8.0",
+    "fastapi>=0.116.0",
+    "pydantic-settings>=2.10.0",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.0",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.0",
+]
+
+[project.scripts]
+legal-graph-api = "legal_graph.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legal_graph"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

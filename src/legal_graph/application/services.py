@@ -2,6 +2,8 @@ import time
 import uuid
 from typing import Any
 
+import tiktoken
+
 from .models import (
     BehaviorSearchRequest,
     ComparisonSearchRequest,
@@ -11,12 +13,32 @@ from .models import (
     ResolveRequest,
     RetrievalQueryRequest,
     SemanticSearchRequest,
+    SearchFilters,
 )
 from .ports import EmbeddingProvider, LegalGraphRepository
 
 
 PROPOSED_WARNING = "Quan he PROPOSED chua duoc chuyen gia phap ly phe duyet"
 SOURCE_METADATA_WARNING = "SOURCE_METADATA: Quan he nguon khong co thong tin trang thai"
+SUPERSEDING_RELATIONSHIPS = {"THAY_THE", "SUA_DOI", "LAM_HET_HIEU_LUC"}
+
+
+def _hit_matches_filters(hit: dict[str, Any], filters: SearchFilters) -> bool:
+    """Reapply document filters to nodes added after the initial search."""
+    node = hit.get("node", {})
+    citation = hit.get("citation") or {}
+    if filters.document_ids and citation.get("document_id") not in filters.document_ids:
+        return False
+    if filters.document_numbers and citation.get("document_number") not in filters.document_numbers:
+        return False
+    if filters.levels and node.get("level") not in filters.levels:
+        return False
+    if (
+        filters.validity_statuses
+        and citation.get("validity_status") not in filters.validity_statuses
+    ):
+        return False
+    return True
 
 
 class RetrievalService:
@@ -36,9 +58,14 @@ class RetrievalService:
             max(request.top_k * 5, 50),
             request.min_score,
         )
-        hits = await self.repository.hydrate_hits(
-            candidates[: request.top_k], request.include_ancestors
-        )
+        if request.index == "behavior_embedding":
+            hits = await self.repository.hydrate_behavior_hits(
+                candidates[: request.top_k], request.include_ancestors
+            )
+        else:
+            hits = await self.repository.hydrate_hits(
+                candidates[: request.top_k], request.include_ancestors
+            )
         for hit in hits:
             score = hit["score"]
             hit["scores"] = {
@@ -66,7 +93,7 @@ class RetrievalService:
             "legal_node_embedding",
             request.filters,
             request.candidate_k,
-            -1,
+            request.min_score,
         )
         keyword = await self.repository.keyword_search(
             request.query, request.filters, request.candidate_k
@@ -136,25 +163,103 @@ class RetrievalService:
                     include_ancestors=request.context.include_ancestors,
                 )
             )
-        elif strategy in {"hybrid", "graph"}:
+        elif strategy == "hybrid":
             result = await self.hybrid_search(
                 HybridSearchRequest(
                     query=request.query,
                     filters=request.filters,
                     top_k=request.retrieval.top_k,
                     candidate_k=request.retrieval.candidate_k,
+                    min_score=request.retrieval.min_score,
                     rerank=request.retrieval.rerank,
                 )
             )
+        elif strategy == "graph":
+            resolved = await self.resolve(ResolveRequest(reference=request.query, limit=12))
+            seeds = [
+                {"node_id": item["node"]["id"], "score": item["confidence"]}
+                for item in resolved["matches"]
+            ]
+            hits = await self.repository.hydrate_hits(
+                seeds[: request.retrieval.top_k], request.context.include_ancestors
+            )
+            for hit in hits:
+                hit["scores"] = {
+                    "vector": None,
+                    "keyword": None,
+                    "reranker": None,
+                    "final": hit["score"],
+                }
+            result = {
+                "query": request.query,
+                "hits": hits,
+                "meta": {"candidate_count": len(seeds), "index": None},
+            }
         else:  # guarded by Pydantic, retained for non-HTTP callers
             raise ValueError(f"Unsupported strategy: {strategy}")
 
         hits = result["hits"]
+        extra_scores: dict[str, float] = {}
+        for hit in hits:
+            if request.context.include_full_article:
+                article = next(
+                    (
+                        node
+                        for node in [hit["node"], *hit.get("ancestors", [])]
+                        if node.get("level") == "article"
+                    ),
+                    None,
+                )
+                if article:
+                    article_context = await self.repository.context(
+                        article["id"],
+                        ancestors=False,
+                        descendant_depth=2,
+                        siblings=False,
+                        include_content=True,
+                        max_nodes=100,
+                    )
+                    if article_context:
+                        for node in [
+                            article_context["node"],
+                            *article_context.get("related_nodes", []),
+                        ]:
+                            extra_scores.setdefault(node["id"], hit["score"])
+            if request.context.include_siblings:
+                sibling_context = await self.repository.context(
+                    hit["node"]["id"],
+                    ancestors=False,
+                    descendant_depth=0,
+                    siblings=True,
+                    include_content=True,
+                    max_nodes=20,
+                )
+                if sibling_context:
+                    for node in sibling_context.get("related_nodes", []):
+                        extra_scores.setdefault(node["id"], hit["score"])
+        existing_ids = {hit["node"]["id"] for hit in hits}
+        if extra_scores:
+            hits.extend(
+                await self.repository.hydrate_hits(
+                    [
+                        {"node_id": node_id, "score": score}
+                        for node_id, score in extra_scores.items()
+                        if node_id not in existing_ids
+                    ],
+                    request.context.include_ancestors,
+                )
+            )
+        if request.context.deduplicate:
+            hits = list({hit["node"]["id"]: hit for hit in hits}.values())
+
+        hits = [hit for hit in hits if _hit_matches_filters(hit, request.filters)]
+
+        initial_ids = {hit["node"]["id"] for hit in hits}
         graph = {"nodes": [], "relationships": [], "paths": [], "truncated": False}
         if request.graph.enabled and hits:
             graph = await self.repository.expand(
                 GraphExpandRequest(
-                    seed_ids=[hit["node"]["id"] for hit in hits],
+                    seed_ids=[hit["node"]["id"] for hit in hits[:100]],
                     relationships=request.graph.relationships,
                     depth=request.graph.depth,
                     relationship_statuses=request.graph.relationship_statuses,
@@ -164,42 +269,94 @@ class RetrievalService:
                 )
             )
 
+        graph_scores: dict[str, float] = {}
+        hit_scores = {hit["node"]["id"]: hit["score"] for hit in hits}
+        for path in graph.get("paths", []):
+            node_ids = path.get("node_ids", [])
+            seed_score = next(
+                (hit_scores[node_id] for node_id in node_ids if node_id in hit_scores), 0
+            )
+            for distance, node_id in enumerate(node_ids):
+                if node_id not in initial_ids:
+                    graph_scores[node_id] = max(
+                        graph_scores.get(node_id, 0), seed_score * (0.9 ** max(distance, 1))
+                    )
+        if graph_scores:
+            hits.extend(
+                await self.repository.hydrate_hits(
+                    [
+                        {"node_id": node_id, "score": score}
+                        for node_id, score in graph_scores.items()
+                    ],
+                    request.context.include_ancestors,
+                )
+            )
+            hits = list({hit["node"]["id"]: hit for hit in hits}.values())
+            hits = [hit for hit in hits if _hit_matches_filters(hit, request.filters)]
+
+        if request.filters.validity_statuses:
+            superseded_ids = {
+                relationship.get("target_id")
+                for relationship in graph.get("relationships", [])
+                if relationship.get("type") in SUPERSEDING_RELATIONSHIPS
+            }
+            hits = [hit for hit in hits if hit["node"]["id"] not in superseded_ids]
+
         citations: list[dict[str, Any]] = []
         citation_ids: dict[str, str] = {}
         contexts: list[dict[str, Any]] = []
         token_count = 0
         truncated = False
+        try:
+            encoding = tiktoken.encoding_for_model(self.embeddings.model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        relationship_ids_by_node: dict[str, list[str]] = {}
+        for relationship in graph.get("relationships", []):
+            relationship_id = relationship.get("id")
+            if not relationship_id:
+                continue
+            for node_id in (relationship.get("source_id"), relationship.get("target_id")):
+                if node_id:
+                    relationship_ids_by_node.setdefault(node_id, []).append(relationship_id)
         for hit in hits:
             citation = hit.get("citation")
             if not citation:
                 continue
             node_id = hit["node"]["id"]
-            citation_id = citation_ids.setdefault(node_id, f"cit_{len(citation_ids) + 1:02d}")
-            if not any(item["citation_id"] == citation_id for item in citations):
-                citation = {**citation, "citation_id": citation_id}
-                citations.append(citation)
             text = hit.get("matched_text") or hit["node"].get("content") or ""
-            estimated = max(1, len(text) // 4)
+            estimated = len(encoding.encode(text))
             if token_count + estimated > request.context.token_budget:
                 truncated = True
                 continue
             token_count += estimated
+            citation_id = citation_ids.setdefault(node_id, f"cit_{len(citation_ids) + 1:02d}")
+            if not any(item["citation_id"] == citation_id for item in citations):
+                citation = {**citation, "citation_id": citation_id}
+                citations.append(citation)
+            if node_id not in initial_ids:
+                source = "GRAPH"
+            elif relationship_ids_by_node.get(node_id):
+                source = "VECTOR_AND_GRAPH"
+            elif hit.get("scores", {}).get("keyword") is not None:
+                source = "HYBRID"
+            else:
+                source = "VECTOR"
             contexts.append(
                 {
                     "context_id": f"ctx_{len(contexts) + 1:02d}",
                     "node": hit["node"],
                     "text": text,
                     "score": hit["score"],
-                    "source": "VECTOR_AND_GRAPH" if graph["relationships"] else "VECTOR",
+                    "source": source,
                     "citation_ids": [citation_id],
-                    "relationship_ids": [],
+                    "relationship_ids": relationship_ids_by_node.get(node_id, []),
                     "warnings": hit.get("warnings", []),
                 }
             )
 
         warnings = list(dict.fromkeys(w for context in contexts for w in context["warnings"]))
         warnings.extend(w for w in graph.get("warnings", []) if w not in warnings)
-        levels = {context["node"].get("level") for context in contexts}
         return {
             "retrieval_id": f"ret_{uuid.uuid4().hex}",
             "query": request.query,
@@ -210,7 +367,13 @@ class RetrievalService:
             "warnings": warnings,
             "coverage": {
                 "documents": len({c["document_id"] for c in citations}),
-                "articles": sum(level == "article" for level in levels),
+                "articles": len(
+                    {
+                        (citation.get("document_id"), citation.get("article"))
+                        for citation in citations
+                        if citation.get("article")
+                    }
+                ),
                 "context_tokens": token_count,
                 "truncated": truncated or graph.get("truncated", False),
             },

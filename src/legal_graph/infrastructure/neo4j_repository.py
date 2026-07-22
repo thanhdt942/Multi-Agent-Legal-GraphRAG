@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import re
 from datetime import date, datetime, timezone
@@ -181,9 +182,9 @@ class Neo4jLegalGraphRepository:
     async def close(self) -> None:
         await self.driver.close()
 
-    async def _read(self, query: str, **parameters: Any) -> list[dict[str, Any]]:
+    async def _read(self, cypher: str, **parameters: Any) -> list[dict[str, Any]]:
         async def work(tx: Any) -> list[dict[str, Any]]:
-            result = await tx.run(query, **parameters)
+            result = await tx.run(cypher, parameters)
             return [dict(record) async for record in result]
 
         try:
@@ -196,9 +197,9 @@ class Neo4jLegalGraphRepository:
         except Neo4jError as error:
             raise AppError("NEO4J_QUERY_FAILED", "Neo4j query failed", status_code=500) from error
 
-    async def _write(self, query: str, **parameters: Any) -> None:
+    async def _write(self, cypher: str, **parameters: Any) -> None:
         async def work(tx: Any) -> None:
-            result = await tx.run(query, **parameters)
+            result = await tx.run(cypher, parameters)
             await result.consume()
 
         async with self.driver.session(database=self.database) as session:
@@ -213,11 +214,27 @@ class Neo4jLegalGraphRepository:
 
     async def ensure_indexes(self) -> None:
         rows = await self._read(
-            "SHOW INDEXES YIELD name, type, options WHERE type = 'VECTOR' RETURN name, options"
+            "SHOW INDEXES YIELD name, type, state, options "
+            "WHERE type = 'VECTOR' RETURN name, state, options"
         )
+        by_name = {row["name"]: row for row in rows if row["name"] in INDEX_SPECS}
+        missing = sorted(set(INDEX_SPECS) - set(by_name))
+        if missing:
+            raise AppError(
+                "EMBEDDING_MODEL_MISMATCH",
+                f"Required vector indexes are missing: {', '.join(missing)}",
+                status_code=409,
+            )
         for row in rows:
             if row["name"] not in INDEX_SPECS:
                 continue
+            if row.get("state") != "ONLINE":
+                raise AppError(
+                    "NEO4J_UNAVAILABLE",
+                    f"Vector index {row['name']} is not ONLINE",
+                    status_code=503,
+                    retryable=True,
+                )
             configured = (row.get("options") or {}).get("indexConfig", {}).get("vector.dimensions")
             if configured is not None and int(configured) != self.dimensions:
                 raise AppError(
@@ -229,6 +246,7 @@ class Neo4jLegalGraphRepository:
             "CREATE FULLTEXT INDEX legal_node_fulltext IF NOT EXISTS "
             "FOR (n:LegalNode) ON EACH [n.title, n.content, n.document_name, n.document_number]"
         )
+        await self._read("CALL db.awaitIndex('legal_node_fulltext', 30)")
 
     async def schema(self, include_counts: bool = False) -> dict[str, Any]:
         labels = ["Document", "Chapter", "Section", "Article", "Clause", "Point", "HanhVi"]
@@ -495,6 +513,7 @@ class Neo4jLegalGraphRepository:
             if label == "HanhVi"
             else "WITH node, score, node AS source"
         )
+        result_id = "node.id" if label == "HanhVi" else "source.id"
         rows = await self._read(
             f"""
             CALL db.index.vector.queryNodes('{index}', $candidate_k, $embedding)
@@ -508,7 +527,7 @@ class Neo4jLegalGraphRepository:
               AND ($validity_statuses IS NULL OR document.validity_status IN $validity_statuses)
               AND ($issued_from IS NULL OR document.issued_date >= $issued_from)
               AND ($issued_to IS NULL OR document.issued_date <= $issued_to)
-            RETURN source.id AS node_id, score, node.id AS semantic_node_id
+            RETURN {result_id} AS node_id, score
             ORDER BY score DESC LIMIT $candidate_k
             """,
             embedding=embedding,
@@ -517,6 +536,43 @@ class Neo4jLegalGraphRepository:
             **self._filter_parameters(filters),
         )
         return rows
+
+    async def hydrate_behavior_hits(
+        self, hits: list[dict[str, Any]], include_source: bool = True
+    ) -> list[dict[str, Any]]:
+        if not hits:
+            return []
+        rows = await self._read(
+            """
+            UNWIND $ids AS behavior_id
+            MATCH (behavior:HanhVi {id: behavior_id})-[:VI_PHAM]->(source:LegalNode)
+            OPTIONAL MATCH path=(document:Document)-[:HAS_CHILD*0..5]->(source)
+            WITH behavior_id, behavior, source, path ORDER BY length(path) DESC
+            WITH behavior_id, behavior, source, collect(nodes(path))[0] AS hierarchy
+            RETURN behavior_id, behavior, source, hierarchy
+            """,
+            ids=[hit["node_id"] for hit in hits],
+        )
+        by_id = {row["behavior_id"]: row for row in rows}
+        hydrated = []
+        for hit in hits:
+            row = by_id.get(hit["node_id"])
+            if not row:
+                continue
+            behavior = public_node(row["behavior"])
+            source = public_node(row["source"])
+            warnings = [PROPOSED_WARNING] if behavior.get("status") == "PROPOSED" else []
+            item = {
+                **hit,
+                "node": behavior,
+                "matched_text": behavior.get("canonical_text") or behavior.get("text") or "",
+                "citation": _citation(source, row.get("hierarchy") or []),
+                "warnings": warnings,
+            }
+            if include_source:
+                item["source_node"] = source
+            hydrated.append(item)
+        return hydrated
 
     async def keyword_search(
         self, query: str, filters: SearchFilters, candidate_k: int
@@ -604,8 +660,8 @@ class Neo4jLegalGraphRepository:
             MATCH (seed {{id: $seed_id}})
             MATCH path=(seed){arrows[0]}[:{relation_fragment}*1..{request.depth}]{arrows[1]}(target)
             WHERE all(r IN relationships(path) WHERE
-                (r.status IS NULL OR r.status IN $statuses)
-                AND (r.confidence IS NULL OR r.confidence >= $min_confidence))
+                (type(r) = 'HAS_CHILD' OR r.status IN $statuses)
+                AND (type(r) = 'HAS_CHILD' OR r.confidence >= $min_confidence))
             RETURN path LIMIT $path_limit
             """,
             seed_id=request.seed_ids[0],
@@ -621,8 +677,8 @@ class Neo4jLegalGraphRepository:
                 MATCH (seed {{id: $seed_id}})
                 MATCH path=(seed){arrows[0]}[:{relation_fragment}*1..{request.depth}]{arrows[1]}(target)
                 WHERE all(r IN relationships(path) WHERE
-                    (r.status IS NULL OR r.status IN $statuses)
-                    AND (r.confidence IS NULL OR r.confidence >= $min_confidence))
+                    (type(r) = 'HAS_CHILD' OR r.status IN $statuses)
+                    AND (type(r) = 'HAS_CHILD' OR r.confidence >= $min_confidence))
                 RETURN path LIMIT $path_limit
                 """,
                     seed_id=seed_id,
@@ -656,7 +712,7 @@ class Neo4jLegalGraphRepository:
                     }
                 )
                 key = f"{data['source_id']}|{data['type']}|{data['target_id']}"
-                data["id"] = f"rel_{abs(hash(key)):x}"
+                data["id"] = f"rel_{hashlib.sha256(key.encode()).hexdigest()[:24]}"
                 relations[key] = data
                 warnings.extend(w for w in data["warnings"] if w not in warnings)
             if request.include_paths and len(node_ids) == len(path.nodes):
@@ -686,8 +742,8 @@ class Neo4jLegalGraphRepository:
               AND ($source_nodes IS NULL OR source.id IN $source_nodes)
               AND ($target_documents IS NULL OR target.document_id IN $target_documents)
               AND ($target_nodes IS NULL OR target.id IN $target_nodes)
-              AND (r.status IS NULL OR r.status IN $statuses)
-              AND (r.confidence IS NULL OR r.confidence >= $min_confidence)
+              AND (type(r) = 'HAS_CHILD' OR r.status IN $statuses)
+              AND (type(r) = 'HAS_CHILD' OR r.confidence >= $min_confidence)
               AND ($cursor_source IS NULL OR source.id > $cursor_source
                    OR (source.id = $cursor_source AND target.id > $cursor_target))
             RETURN source, target, type(r) AS type, properties(r) AS properties,
@@ -803,41 +859,75 @@ class Neo4jLegalGraphRepository:
             for item in graph_items
         ]
         if embedding is not None and len(items) < request.top_k:
-            filters = SearchFilters(document_ids=[request.target_document_id], levels=["article"])
-            candidates = await self.vector_search(
-                embedding, "article_comparison_embedding", filters, request.top_k * 5, -1
-            )
-            targets = await self.hydrate_hits(candidates)
-            source_ids = request.source_node_ids
+            source_ids = list(request.source_node_ids)
             if not source_ids:
-                source_rows = await self._read(
-                    "MATCH (n:Article {document_id: $id}) RETURN n.id AS id ORDER BY n.order LIMIT 1",
-                    id=request.source_document_id,
+                source_filters = SearchFilters(
+                    document_ids=[request.source_document_id], levels=["article"]
                 )
-                source_ids = [row["id"] for row in source_rows]
-            source = (
-                (await self.hydrate_hits([{"node_id": source_ids[0], "score": 1.0}]))
-                if source_ids
-                else []
+                source_candidates = await self.vector_search(
+                    embedding,
+                    "article_comparison_embedding",
+                    source_filters,
+                    min(request.top_k * 3, 50),
+                    -1,
+                )
+                source_ids = [item["node_id"] for item in source_candidates[:5]]
+            source_vectors = await self._read(
+                """
+                MATCH (source:Article)
+                WHERE source.id IN $source_ids AND source.document_id = $document_id
+                  AND source.comparison_embedding IS NOT NULL
+                RETURN source.id AS source_id, source.comparison_embedding AS embedding
+                """,
+                source_ids=source_ids,
+                document_id=request.source_document_id,
             )
+            target_filters = SearchFilters(
+                document_ids=[request.target_document_id], levels=["article"]
+            )
+            pairs: list[tuple[str, dict[str, Any]]] = []
+            for source_row in source_vectors:
+                candidates = await self.vector_search(
+                    source_row["embedding"],
+                    "article_comparison_embedding",
+                    target_filters,
+                    max(request.top_k * 2, 10),
+                    -1,
+                )
+                pairs.extend((source_row["source_id"], candidate) for candidate in candidates)
+            source_hits = await self.hydrate_hits(
+                [{"node_id": source_id, "score": 1.0} for source_id in source_ids]
+            )
+            target_hits = await self.hydrate_hits(
+                [{"node_id": target["node_id"], "score": target["score"]} for _, target in pairs]
+            )
+            sources = {hit["node"]["id"]: hit for hit in source_hits}
+            targets = {hit["node"]["id"]: hit for hit in target_hits}
             existing = {(item["source"]["id"], item["target"]["id"]) for item in items}
-            for target in targets:
-                if not source or (source[0]["node"]["id"], target["node"]["id"]) in existing:
+            pairs.sort(key=lambda pair: pair[1]["score"], reverse=True)
+            for source_id, candidate in pairs:
+                target_id = candidate["node_id"]
+                if (source_id, target_id) in existing:
+                    continue
+                source = sources.get(source_id)
+                target = targets.get(target_id)
+                if not source or not target:
                     continue
                 items.append(
                     {
-                        "source": source[0]["node"],
+                        "source": source["node"],
                         "target": target["node"],
                         "relationship": None,
-                        "source_citation": source[0]["citation"],
+                        "source_citation": source["citation"],
                         "target_citation": target["citation"],
                         "match_origin": "VECTOR_CANDIDATE",
-                        "confidence": target["score"],
+                        "confidence": candidate["score"],
                         "warnings": [
                             "VECTOR_CANDIDATE chi la ung vien ngu nghia, khong phai quan he phap ly da xac nhan"
                         ],
                     }
                 )
+                existing.add((source_id, target_id))
                 if len(items) >= request.top_k:
                     break
         return {"items": items[: request.top_k]}

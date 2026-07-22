@@ -1,18 +1,22 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from legal_graph.agents import LegalAgentWorkflow
 from legal_graph.application.services import RetrievalService
-from legal_graph.core.config import Settings, get_settings
+from legal_graph.core.config import ROOT, Settings, get_settings
 from legal_graph.core.errors import AppError
 from legal_graph.core.middleware import RequestContextMiddleware
 from legal_graph.http.v1.router import router
 from legal_graph.infrastructure.neo4j_repository import Neo4jLegalGraphRepository
+from legal_graph.infrastructure.openai_chat import OpenAIChatProvider
 from legal_graph.infrastructure.openai_embeddings import OpenAIEmbeddingProvider
 
 
@@ -47,15 +51,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.openai_embedding_dimensions,
             settings.request_timeout_ms / 1000,
         )
-        app.state.repository = repository
-        app.state.embeddings = embeddings
-        app.state.retrieval_service = RetrievalService(repository, embeddings)
-        await repository.ensure_indexes()
-        try:
-            yield
-        finally:
-            await embeddings.close()
-            await repository.close()
+        chat = OpenAIChatProvider(
+            settings.openai_api_key.get_secret_value(), settings.answer_timeout_ms / 1000
+        )
+        checkpoint_path = Path(settings.agent_checkpoint_path)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = ROOT / checkpoint_path
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+            await checkpointer.setup()
+            retrieval_service = RetrievalService(repository, embeddings)
+            app.state.repository = repository
+            app.state.embeddings = embeddings
+            app.state.chat = chat
+            app.state.retrieval_service = retrieval_service
+            app.state.agent_workflow = LegalAgentWorkflow(
+                retrieval_service, chat, settings, checkpointer
+            )
+            await repository.ensure_indexes()
+            try:
+                yield
+            finally:
+                await chat.close()
+                await embeddings.close()
+                await repository.close()
 
     app = FastAPI(
         title=settings.app_name,
@@ -87,6 +106,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(
             error_body(request, "INVALID_REQUEST", "Request validation failed", details, False),
             status_code=400,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error_handler(request: Request, error: Exception) -> JSONResponse:
+        return JSONResponse(
+            error_body(
+                request,
+                "INTERNAL_ERROR",
+                "An unexpected internal error occurred",
+                [],
+                False,
+            ),
+            status_code=500,
         )
 
     return app

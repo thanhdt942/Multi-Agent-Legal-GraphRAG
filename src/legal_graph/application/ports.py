@@ -1,4 +1,8 @@
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
+
+from pydantic import BaseModel
+
+from .agent_models import ModelUsage
 
 from .models import (
     BehaviorSearchRequest,
@@ -15,6 +19,23 @@ class EmbeddingProvider(Protocol):
     dimensions: int
 
     async def embed(self, text: str) -> list[float]: ...
+
+    async def health(self) -> bool: ...
+
+
+StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
+
+
+class ChatProvider(Protocol):
+    async def generate_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_model: type[StructuredOutput],
+        *,
+        model: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> tuple[StructuredOutput, ModelUsage]: ...
 
     async def health(self) -> bool: ...
 
@@ -52,4 +73,7 @@ class LegalGraphRepository(Protocol):
     ) -> dict[str, Any]: ...
     async def hydrate_hits(
         self, hits: list[dict[str, Any]], include_ancestors: bool = True
+    ) -> list[dict[str, Any]]: ...
+    async def hydrate_behavior_hits(
+        self, hits: list[dict[str, Any]], include_source: bool = True
     ) -> list[dict[str, Any]]: ...

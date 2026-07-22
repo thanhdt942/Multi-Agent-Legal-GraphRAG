@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = Field(default=1536, ge=1)
+    openai_answer_model: str = "gpt-5.4-mini"
+    openai_critic_model: str = "gpt-5.4-mini"
+    agent_max_critique_attempts: int = Field(default=2, ge=1, le=3)
+    agent_checkpoint_path: str = ".legal_graph_checkpoints.sqlite"
+    answer_timeout_ms: int = Field(default=60_000, ge=1000, le=120_000)
     request_timeout_ms: int = Field(default=10_000, ge=100, le=30_000)
 
     @field_validator("neo4j_auth")

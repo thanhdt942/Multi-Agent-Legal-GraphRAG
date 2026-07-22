@@ -1,7 +1,7 @@
 [project]
 name = "vietnamese-legal-document"
 version = "0.1.0"
-description = "Retrieval API for the Vietnamese legal knowledge graph"
+description = "Multi-agent GraphRAG API for the Vietnamese legal knowledge graph"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,6 +15,8 @@ dependencies = [
     "fastapi>=0.116.0",
     "pydantic-settings>=2.10.0",
     "uvicorn[standard]>=0.35.0",
+    "langgraph>=0.6.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
 ]
 
 [dependency-groups]

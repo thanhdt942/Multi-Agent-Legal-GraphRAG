@@ -1,10 +1,13 @@
+import json
 from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from legal_graph import __version__
+from legal_graph.agents import LegalAgentWorkflow
+from legal_graph.application.agent_models import AnswerRequest, AnswerResponse
 from legal_graph.application.models import (
     BatchGetRequest,
     BehaviorSearchRequest,
@@ -19,17 +22,22 @@ from legal_graph.application.models import (
 )
 from legal_graph.application.services import RetrievalService
 from legal_graph.core.errors import not_found
-from legal_graph.http.dependencies import get_repository, get_service
+from legal_graph.http.dependencies import get_agent_workflow, get_repository, get_service
 from legal_graph.infrastructure.neo4j_repository import Neo4jLegalGraphRepository
 
 
 router = APIRouter(prefix="/v1")
 Repository = Annotated[Neo4jLegalGraphRepository, Depends(get_repository)]
 Service = Annotated[RetrievalService, Depends(get_service)]
+AgentWorkflow = Annotated[LegalAgentWorkflow, Depends(get_agent_workflow)]
+
+
+def sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.get("/health")
-async def health(repository: Repository, service: Service) -> Any:
+async def health(repository: Repository, service: Service, agent: AgentWorkflow) -> Any:
     neo4j_ok = await repository.health()
     body = {
         "status": "ok" if neo4j_ok else "degraded",
@@ -37,7 +45,7 @@ async def health(repository: Repository, service: Service) -> Any:
         "dependencies": {
             "neo4j": "ok" if neo4j_ok else "unavailable",
             "embedding_provider": "ok" if await service.embeddings.health() else "unavailable",
-            "answer_model": "not_configured",
+            "answer_model": "ok" if await agent.chat.health() else "unavailable",
         },
         "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -64,6 +72,11 @@ async def capabilities(service: Service) -> dict[str, Any]:
             "dimensions": service.embeddings.dimensions,
         },
         "limits": {"max_top_k": 50, "max_graph_depth": 3, "max_context_tokens": 24_000},
+        "answering": {
+            "langgraph": True,
+            "streaming": True,
+            "historical_comparison_scope": ["177815", "32833"],
+        },
     }
 
 
@@ -224,3 +237,62 @@ async def comparisons_search(body: ComparisonSearchRequest, service: Service) ->
 @router.post("/retrieval/query")
 async def retrieval_query(body: RetrievalQueryRequest, service: Service) -> dict[str, Any]:
     return await service.retrieval_query(body)
+
+
+@router.post("/answers", response_model=AnswerResponse)
+async def answer_question(body: AnswerRequest, agent: AgentWorkflow) -> AnswerResponse:
+    return await agent.answer(body)
+
+
+@router.post("/answers:stream")
+async def stream_answer(
+    body: AnswerRequest, agent: AgentWorkflow, request: Request
+) -> StreamingResponse:
+    async def events() -> Any:
+        try:
+            async for event, data in agent.answer_events(body):
+                if await request.is_disconnected():
+                    return
+                if event != "result":
+                    yield sse_event(event, data)
+                    continue
+                response = AnswerResponse.model_validate(data)
+                for citation in response.citations:
+                    yield sse_event(
+                        "citation",
+                        {
+                            "citation_id": citation.citation_id,
+                            "citation": citation.model_dump(mode="json"),
+                        },
+                    )
+                for start in range(0, len(response.answer), 160):
+                    if await request.is_disconnected():
+                        return
+                    yield sse_event("answer.delta", {"text": response.answer[start : start + 160]})
+                yield sse_event(
+                    "answer.completed",
+                    {
+                        "answer_id": response.answer_id,
+                        "thread_id": response.thread_id,
+                        "confidence": response.confidence,
+                        "abstained": response.abstained,
+                        "claims": [claim.model_dump(mode="json") for claim in response.claims],
+                        "warnings": response.warnings,
+                        "usage": response.usage.model_dump(mode="json"),
+                    },
+                )
+        except Exception as error:
+            yield sse_event(
+                "error",
+                {
+                    "code": getattr(error, "code", "INTERNAL_ERROR"),
+                    "message": getattr(error, "message", "Answer generation failed"),
+                    "retryable": getattr(error, "retryable", False),
+                },
+            )
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

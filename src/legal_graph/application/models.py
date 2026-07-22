@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+CURRENT_VALIDITY_STATUSES = ("Còn hiệu lực", "Hết hiệu lực một phần")
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -38,7 +40,9 @@ class SearchFilters(StrictModel):
     document_ids: list[str] = Field(default_factory=list, max_length=100)
     document_numbers: list[str] = Field(default_factory=list, max_length=100)
     levels: list[Level] = Field(default_factory=list)
-    validity_statuses: list[str] = Field(default_factory=list, max_length=20)
+    validity_statuses: list[str] = Field(
+        default_factory=lambda: list(CURRENT_VALIDITY_STATUSES), max_length=20
+    )
     issued_from: date | None = None
     issued_to: date | None = None
 
@@ -97,6 +101,7 @@ class HybridSearchRequest(StrictModel):
     filters: SearchFilters = Field(default_factory=SearchFilters)
     top_k: int = Field(default=10, ge=1, le=50)
     candidate_k: int = Field(default=50, ge=1, le=200)
+    min_score: float = Field(default=-1, ge=-1, le=1)
     weights: SearchWeights = Field(default_factory=SearchWeights)
     rerank: bool = False
 
@@ -174,6 +179,12 @@ class RetrievalOptions(StrictModel):
     candidate_k: int = Field(default=50, ge=1, le=200)
     min_score: float = Field(default=0.6, ge=-1, le=1)
     rerank: bool = False
+
+    @model_validator(mode="after")
+    def candidate_pool(self) -> "RetrievalOptions":
+        if self.candidate_k < self.top_k:
+            raise ValueError("candidate_k must be greater than or equal to top_k")
+        return self
 
 
 class RetrievalGraphOptions(StrictModel):
